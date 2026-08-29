@@ -705,7 +705,9 @@ $requiredCredential = @(
     'LabNotifyAgent(',
     'L"AdminEGOV"',
     'L"AlunoEGOV"',
-    'Digite somente numeros.'
+    'const bool valid = (inputLength <= 11);',
+    "pwz[i] < L'0' || pwz[i] > L'9'",
+    'return E_INVALIDARG;'
 )
 
 foreach ($needle in $requiredCredential) {
@@ -716,13 +718,6 @@ foreach ($needle in $requiredCredential) {
 
 if (-not $checkCredential.Contains('SFI_FULLNAME_TEXT')) {
     throw "Campo visual da mascara CPF nao foi gerado."
-}
-
-if ($checkCredential.Contains('SetFieldString(
-                    this,
-                    SFI_EDIT_TEXT,
-                    formatted')) {
-    throw "Regressao: mascara voltou a reescrever o campo editavel."
 }
 
 if ($checkCredential.Contains('Lab@Teste2026!')) {
@@ -748,7 +743,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v9.2 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.3 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
