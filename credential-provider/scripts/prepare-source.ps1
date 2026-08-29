@@ -1,5 +1,12 @@
 ﻿$ErrorActionPreference = "Stop"
 
+# Preflight: o proprio script nao pode conter byte NUL literal.
+$SelfBytes = [System.IO.File]::ReadAllBytes($PSCommandPath)
+if ($SelfBytes -contains 0) {
+    throw "prepare-source.ps1 contem byte NUL literal."
+}
+
+
 $repo = "https://raw.githubusercontent.com/microsoft/Windows-classic-samples/main/Samples/CredentialProvider/cpp"
 $out = Join-Path $PSScriptRoot "..\generated"
 
@@ -359,7 +366,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
             formatted[outPos++] = pwz[i];
         }
 
-        formatted[outPos] = L' ';
+        formatted[outPos] = L'\0';
 
         wchar_t formattedLine[32] = {};
 
@@ -753,7 +760,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v9.0 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.1 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
