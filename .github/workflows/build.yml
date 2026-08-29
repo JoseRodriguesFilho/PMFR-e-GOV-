@@ -1,4 +1,4 @@
-name: Build e-GOV Login v8.8
+name: Build e-GOV Login v9.0
 
 on:
   workflow_dispatch:
@@ -120,7 +120,7 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: eGOV-Login-v8.8-Windows-x64
+          name: eGOV-Login-v9.0-Windows-x64
           path: artifact/
           if-no-files-found: error
           retention-days: 30
