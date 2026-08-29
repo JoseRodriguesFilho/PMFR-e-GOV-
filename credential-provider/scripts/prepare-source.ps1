@@ -166,6 +166,27 @@ $x = $x.Replace(
     '*pdwAdjacentTo = SFI_EDIT_TEXT;')
 
 # Limpa o campo que sera usado para mostrar o nome retornado pela API.
+$fullNamePattern = '(?s)    if \(SUCCEEDED\(hr\)\)\s*\{\s*PWSTR pszUserName;.*?    \}\s*(?=    if \(SUCCEEDED\(hr\)\)\s*\{\s*PWSTR pszDisplayName;)'
+
+$fullNameReplacement = @'
+    if (SUCCEEDED(hr))
+    {
+        hr = SHStrDupW(L"", &_rgFieldStrings[SFI_FULLNAME_TEXT]);
+    }
+
+'@
+
+$x2 = [regex]::Replace(
+    $x,
+    $fullNamePattern,
+    $fullNameReplacement)
+
+if ($x2 -eq $x) {
+    throw "Bloco FullName nao encontrado."
+}
+
+$x = $x2
+
 $displayPattern = '(?s)    if \(SUCCEEDED\(hr\)\)\s*\{\s*PWSTR pszDisplayName;.*?    \}\s*(?=    if \(SUCCEEDED\(hr\)\)\s*\{\s*PWSTR pszLogonStatus;)'
 
 $displayReplacement = @'
@@ -241,163 +262,90 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
     if (dwFieldID == SFI_EDIT_TEXT)
     {
-        if (_fUpdatingCpf)
-        {
-            return S_OK;
-        }
+        // IMPORTANTE:
+        // O campo editavel mantem SOMENTE os 11 digitos.
+        // Nao usamos SetFieldString() no proprio campo durante entrada valida,
+        // porque o LogonUI nao oferece API para preservar/reposicionar o caret.
+        // A mascara visual e mostrada em SFI_FULLNAME_TEXT, que e read-only.
 
-        // Mantem uma copia do ultimo valor valido para poder rejeitar
-        // caracteres nao numericos, pontuacao digitada manualmente e
-        // o 12o digito sem deixar lixo visual no campo.
-        wchar_t previousFormatted[15] = {};
         wchar_t previousDigits[12] = {};
-        size_t previousDigitCount = 0;
 
         if (_rgFieldStrings[SFI_EDIT_TEXT] != nullptr)
         {
             StringCchCopyW(
-                previousFormatted,
-                ARRAYSIZE(previousFormatted),
+                previousDigits,
+                ARRAYSIZE(previousDigits),
                 _rgFieldStrings[SFI_EDIT_TEXT]);
-
-            for (PCWSTR p = previousFormatted;
-                 *p != L'\0' && previousDigitCount < 11;
-                 ++p)
-            {
-                if (*p >= L'0' && *p <= L'9')
-                {
-                    previousDigits[previousDigitCount++] = *p;
-                }
-            }
         }
 
-        wchar_t digits[12] = {};
-        size_t digitCount = 0;
-        bool invalidCharacter = false;
-        bool tooManyDigits = false;
+        const size_t inputLength = wcslen(pwz);
 
-        for (PCWSTR p = pwz; *p != L'\0'; ++p)
+        bool valid = (inputLength <= 11);
+
+        if (valid)
         {
-            if (*p >= L'0' && *p <= L'9')
+            for (size_t i = 0; i < inputLength; ++i)
             {
-                if (digitCount >= 11)
+                if (pwz[i] < L'0' || pwz[i] > L'9')
                 {
-                    tooManyDigits = true;
+                    valid = false;
                     break;
                 }
-
-                digits[digitCount++] = *p;
-            }
-            else if (*p == L'.' || *p == L'-')
-            {
-                // Pontuacao existente da propria mascara pode aparecer em pwz.
-                // Abaixo identificamos se ponto/traco foi digitado pelo usuario.
-            }
-            else
-            {
-                // Letras, espacos e qualquer outro caractere sao proibidos.
-                invalidCharacter = true;
-                break;
             }
         }
 
-        auto restorePreviousValue =
-            [&]()
-            {
-                if (_pCredProvCredentialEvents &&
-                    wcscmp(previousFormatted, pwz) != 0)
-                {
-                    _fUpdatingCpf = true;
-
-                    _pCredProvCredentialEvents->SetFieldString(
-                        this,
-                        SFI_EDIT_TEXT,
-                        previousFormatted);
-
-                    _fUpdatingCpf = false;
-                }
-            };
-
-        if (invalidCharacter || tooManyDigits)
+        if (!valid)
         {
-            restorePreviousValue();
-
+            // So reescreve o campo quando o usuario tentou uma entrada invalida
+            // (letra, espaco, simbolo, ponto/traco manual ou 12o digito).
+            // Na digitacao numerica normal e na edicao no meio, o caret nao e tocado.
             if (_pCredProvCredentialEvents)
             {
+                _fUpdatingCpf = true;
+
+                _pCredProvCredentialEvents->SetFieldString(
+                    this,
+                    SFI_EDIT_TEXT,
+                    previousDigits);
+
                 _pCredProvCredentialEvents->SetFieldString(
                     this,
                     SFI_DISPLAYNAME_TEXT,
-                    invalidCharacter
-                        ? L"Digite somente numeros."
-                        : L"O CPF deve ter exatamente 11 digitos.");
+                    inputLength > 11
+                        ? L"O CPF deve ter 11 digitos."
+                        : L"Digite somente numeros.");
+
+                _fUpdatingCpf = false;
             }
 
             return S_OK;
         }
 
-        // Descobre apenas o trecho efetivamente alterado pelo usuario.
-        // Isso permite diferenciar a pontuacao que ja fazia parte da mascara
-        // de um '.' ou '-' digitado manualmente.
-        size_t oldLength = wcslen(previousFormatted);
-        size_t newLength = wcslen(pwz);
+        const bool changed =
+            wcscmp(previousDigits, pwz) != 0;
 
-        size_t prefixLength = 0;
+        PWSTR* stored =
+            &_rgFieldStrings[SFI_EDIT_TEXT];
 
-        while (prefixLength < oldLength &&
-               prefixLength < newLength &&
-               previousFormatted[prefixLength] == pwz[prefixLength])
+        CoTaskMemFree(*stored);
+        *stored = nullptr;
+
+        HRESULT hr =
+            SHStrDupW(
+                pwz,
+                stored);
+
+        if (FAILED(hr))
         {
-            ++prefixLength;
+            return hr;
         }
 
-        size_t suffixLength = 0;
-
-        while (suffixLength < (oldLength - prefixLength) &&
-               suffixLength < (newLength - prefixLength) &&
-               previousFormatted[oldLength - 1 - suffixLength] ==
-                   pwz[newLength - 1 - suffixLength])
-        {
-            ++suffixLength;
-        }
-
-        const size_t changedStart = prefixLength;
-        const size_t changedEnd =
-            newLength - suffixLength;
-
-        bool punctuationTypedByUser = false;
-
-        for (size_t i = changedStart;
-             i < changedEnd;
-             ++i)
-        {
-            if (pwz[i] == L'.' || pwz[i] == L'-')
-            {
-                punctuationTypedByUser = true;
-                break;
-            }
-        }
-
-        if (punctuationTypedByUser)
-        {
-            restorePreviousValue();
-
-            if (_pCredProvCredentialEvents)
-            {
-                _pCredProvCredentialEvents->SetFieldString(
-                    this,
-                    SFI_DISPLAYNAME_TEXT,
-                    L"Digite somente numeros. A mascara e automatica.");
-            }
-
-            return S_OK;
-        }
-
-        // Formata sempre a partir dos 0..11 digitos puros.
-        // Resultado: 000.000.000-00
+        // Formata apenas para exibicao:
+        // 000.000.000-00
         wchar_t formatted[15] = {};
         size_t outPos = 0;
 
-        for (size_t i = 0; i < digitCount; ++i)
+        for (size_t i = 0; i < inputLength; ++i)
         {
             if (i == 3 || i == 6)
             {
@@ -408,53 +356,41 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 formatted[outPos++] = L'-';
             }
 
-            formatted[outPos++] = digits[i];
+            formatted[outPos++] = pwz[i];
         }
 
-        formatted[outPos] = L'\0';
+        formatted[outPos] = L' ';
 
-        const bool digitsChanged =
-            (digitCount != previousDigitCount) ||
-            (wcscmp(digits, previousDigits) != 0);
+        wchar_t formattedLine[32] = {};
 
-        PWSTR* stored = &_rgFieldStrings[SFI_EDIT_TEXT];
-        CoTaskMemFree(*stored);
-        *stored = nullptr;
-
-        HRESULT hr = SHStrDupW(
-            formatted,
-            stored);
-
-        if (FAILED(hr))
+        if (inputLength > 0)
         {
-            return hr;
+            StringCchPrintfW(
+                formattedLine,
+                ARRAYSIZE(formattedLine),
+                L"CPF: %s",
+                formatted);
         }
 
         if (_pCredProvCredentialEvents)
         {
-            _fUpdatingCpf = true;
             _pCredProvCredentialEvents->BeginFieldUpdates();
 
-            // Ponto importante:
-            // nao reescreve o campo a cada tecla. Isso evita que o LogonUI
-            // reposicione o cursor desnecessariamente. So atualiza o controle
-            // quando realmente e necessario inserir/remover pontuacao.
-            if (wcscmp(formatted, pwz) != 0)
-            {
-                _pCredProvCredentialEvents->SetFieldString(
-                    this,
-                    SFI_EDIT_TEXT,
-                    formatted);
-            }
+            // Atualiza somente campos read-only. Isso nao movimenta o caret
+            // do CPFT_EDIT_TEXT.
+            _pCredProvCredentialEvents->SetFieldString(
+                this,
+                SFI_FULLNAME_TEXT,
+                formattedLine);
 
-            if (digitCount < 11)
+            if (inputLength < 11)
             {
                 _pCredProvCredentialEvents->SetFieldString(
                     this,
                     SFI_DISPLAYNAME_TEXT,
                     L"");
             }
-            else if (digitsChanged)
+            else if (changed)
             {
                 const bool adminTarget =
                     LabIsAccount(
@@ -462,9 +398,10 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                         L"AdminEGOV");
 
                 LAB_AUTH_RESPONSE preview;
+
                 LAB_AUTH_RESULT previewResult =
                     LabPreviewCpf(
-                        digits,
+                        pwz,
                         adminTarget,
                         &preview);
 
@@ -510,7 +447,6 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
             }
 
             _pCredProvCredentialEvents->EndFieldUpdates();
-            _fUpdatingCpf = false;
         }
 
         return S_OK;
@@ -780,14 +716,23 @@ $requiredCredential = @(
     'L"AdminEGOV"',
     'L"AlunoEGOV"',
     'Digite somente numeros.'
-    'A mascara e automatica.'
-    'wcscmp(formatted, pwz) != 0'
 )
 
 foreach ($needle in $requiredCredential) {
     if (-not $checkCredential.Contains($needle)) {
         throw "Validacao falhou em CSampleCredential.cpp: $needle"
     }
+}
+
+if (-not $checkCredential.Contains('SFI_FULLNAME_TEXT')) {
+    throw "Campo visual da mascara CPF nao foi gerado."
+}
+
+if ($checkCredential.Contains('SetFieldString(
+                    this,
+                    SFI_EDIT_TEXT,
+                    formatted')) {
+    throw "Regressao: mascara voltou a reescrever o campo editavel."
 }
 
 if ($checkCredential.Contains('Lab@Teste2026!')) {
@@ -808,7 +753,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v8.9 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.0 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
