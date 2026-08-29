@@ -1,4 +1,4 @@
-# e-GOV Login v8
+# e-GOV Login v8.1
 
 Versao consolidada do login por CPF para Windows 11 Pro.
 
@@ -360,3 +360,15 @@ GUID do Credential Provider:
 ```text
 {D2D9E531-8DB1-4C83-ABF9-810F70A1EB09}
 ```
+
+
+## Correção v8.1
+
+Corrige o build do `eGOVLabCPFAgent.exe` adicionando o namespace:
+
+```csharp
+using System.IO.Pipes;
+```
+
+Ele é necessário para `NamedPipeServerStream`, `PipeDirection`,
+`PipeTransmissionMode` e `PipeOptions`.

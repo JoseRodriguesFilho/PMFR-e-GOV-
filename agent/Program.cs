@@ -1,4 +1,5 @@
 using System.Net;
+using System.IO.Pipes;
 using System.Net.Http.Json;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
