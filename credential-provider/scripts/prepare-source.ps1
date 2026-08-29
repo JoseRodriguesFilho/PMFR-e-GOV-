@@ -188,14 +188,15 @@ if ($x2 -eq $x) {
 $x = $x2
 
 # Depois de obter o usuario qualificado, personaliza o titulo da tile.
-$qualifiedBlock = @'
-    if (SUCCEEDED(hr))
-    {
-        hr = pcpUser->GetStringValue(PKEY_Identity_QualifiedUserName, &_pszQualifiedUserName);
-    }
-'@
+# Usa regex em vez de Contains/Replace exato para nao depender de CRLF/LF
+# do arquivo baixado pelo Invoke-WebRequest no runner do GitHub Actions.
+$qualifiedPattern = '(?ms)^[ \t]*if \(SUCCEEDED\(hr\)\)\s*\{\s*hr = pcpUser->GetStringValue\(PKEY_Identity_QualifiedUserName, &_pszQualifiedUserName\);\s*\}'
 
-if (-not $x.Contains($qualifiedBlock)) {
+$qualifiedMatch = [regex]::Match(
+    $x,
+    $qualifiedPattern)
+
+if (-not $qualifiedMatch.Success) {
     throw "Bloco QualifiedUserName nao encontrado."
 }
 
@@ -214,9 +215,16 @@ $titleBlock = @'
     }
 '@
 
-$x = $x.Replace(
-    $qualifiedBlock,
-    $qualifiedBlock + $titleBlock)
+$qualifiedReplacement =
+    $qualifiedMatch.Value +
+    $titleBlock
+
+$x =
+    $x.Substring(0, $qualifiedMatch.Index) +
+    $qualifiedReplacement +
+    $x.Substring(
+        $qualifiedMatch.Index +
+        $qualifiedMatch.Length)
 
 # ---------------------------------------------------------------------------
 # Mascara CPF + preview do nome ao completar 11 digitos.
@@ -572,14 +580,15 @@ $x = $x.Replace(
     $oldProtect,
     $newProtect)
 
-$serializationEndNeedle = @'
-    return hr;
-}
+# Final de GetSerialization: regex tolerante a CRLF/LF.
+$serializationEndPattern =
+    '(?ms)^[ \t]*return hr;\s*\}\s*(?=struct REPORT_RESULT_STATUS_INFO)'
 
-struct REPORT_RESULT_STATUS_INFO
-'@
+$serializationEndMatch = [regex]::Match(
+    $x,
+    $serializationEndPattern)
 
-if (-not $x.Contains($serializationEndNeedle)) {
+if (-not $serializationEndMatch.Success) {
     throw "Final de GetSerialization nao encontrado."
 }
 
@@ -600,12 +609,14 @@ $serializationEndReplacement = @'
     return hr;
 }
 
-struct REPORT_RESULT_STATUS_INFO
 '@
 
-$x = $x.Replace(
-    $serializationEndNeedle,
-    $serializationEndReplacement)
+$x =
+    $x.Substring(0, $serializationEndMatch.Index) +
+    $serializationEndReplacement +
+    $x.Substring(
+        $serializationEndMatch.Index +
+        $serializationEndMatch.Length)
 
 Set-Content $credPath $x -Encoding UTF8
 
@@ -650,7 +661,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v8 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v8.2 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green

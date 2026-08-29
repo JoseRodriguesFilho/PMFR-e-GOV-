@@ -1,4 +1,4 @@
-# e-GOV Login v8.1
+# e-GOV Login v8.2
 
 Versao consolidada do login por CPF para Windows 11 Pro.
 
@@ -372,3 +372,14 @@ using System.IO.Pipes;
 
 Ele é necessário para `NamedPipeServerStream`, `PipeDirection`,
 `PipeTransmissionMode` e `PipeOptions`.
+
+
+## Correção v8.2
+
+O `prepare-source.ps1` não usa mais correspondência textual exata no bloco
+`PKEY_Identity_QualifiedUserName`. O GitHub Actions pode baixar o fonte da
+Microsoft com LF enquanto o script é interpretado com CRLF, fazendo
+`Contains()` falhar mesmo com o código presente.
+
+A v8.2 usa regex tolerante a LF/CRLF tanto para o bloco
+`QualifiedUserName` quanto para o final de `GetSerialization`.
