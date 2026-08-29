@@ -581,14 +581,8 @@ $authBlock = @'
         SHStrDupW(statusText, ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
 
-        if (_pCredProvCredentialEvents)
-        {
-            _pCredProvCredentialEvents->SetFieldString(
-                this,
-                SFI_EDIT_TEXT,
-                L"");
-        }
-
+        // Mantem o CPF digitado em caso de negacao.
+        // Nao reescreve CPFT_EDIT_TEXT, pois isso altera o caret no LogonUI.
         return S_OK;
     }
 
@@ -704,15 +698,33 @@ $requiredCredential = @(
     'LabReadLocalPassword(',
     'LabNotifyAgent(',
     'L"AdminEGOV"',
-    'L"AlunoEGOV"',
-    'const bool valid = (inputLength <= 11);',
-    "pwz[i] < L'0' || pwz[i] > L'9'",
-    'return E_INVALIDARG;'
+    'L"AlunoEGOV"'
 )
 
 foreach ($needle in $requiredCredential) {
     if (-not $checkCredential.Contains($needle)) {
-        throw "Validacao falhou em CSampleCredential.cpp: $needle"
+        throw "Validacao estrutural falhou em CSampleCredential.cpp: $needle"
+    }
+}
+
+$cpfInputChecks = @(
+    @{
+        Name = "limite de 11 digitos"
+        Pattern = 'bool\s+valid\s*=\s*\(inputLength\s*<=\s*11\)\s*;'
+    },
+    @{
+        Name = "somente 0-9"
+        Pattern = 'pwz\[i\]\s*<\s*L''0''\s*\|\|\s*pwz\[i\]\s*>\s*L''9'''
+    },
+    @{
+        Name = "entrada invalida rejeitada"
+        Pattern = 'if\s*\(!valid\)\s*\{(?s:.*?)return\s+E_INVALIDARG\s*;'
+    }
+)
+
+foreach ($check in $cpfInputChecks) {
+    if (-not [regex]::IsMatch($checkCredential, $check.Pattern)) {
+        throw "Validacao CPF falhou: $($check.Name)"
     }
 }
 
@@ -743,7 +755,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v9.3 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.4 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
