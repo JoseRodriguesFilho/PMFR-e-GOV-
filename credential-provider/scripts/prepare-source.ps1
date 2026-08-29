@@ -303,29 +303,12 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
         if (!valid)
         {
-            // So reescreve o campo quando o usuario tentou uma entrada invalida
-            // (letra, espaco, simbolo, ponto/traco manual ou 12o digito).
-            // Na digitacao numerica normal e na edicao no meio, o caret nao e tocado.
-            if (_pCredProvCredentialEvents)
-            {
-                _fUpdatingCpf = true;
-
-                _pCredProvCredentialEvents->SetFieldString(
-                    this,
-                    SFI_EDIT_TEXT,
-                    previousDigits);
-
-                _pCredProvCredentialEvents->SetFieldString(
-                    this,
-                    SFI_DISPLAYNAME_TEXT,
-                    inputLength > 11
-                        ? L"O CPF deve ter 11 digitos."
-                        : L"Digite somente numeros.");
-
-                _fUpdatingCpf = false;
-            }
-
-            return S_OK;
+            // NUNCA reescreve o CPFT_EDIT_TEXT aqui.
+            // Reescrever esse campo com SetFieldString() reposiciona o caret
+            // no LogonUI. Retornamos falha para rejeitar a alteracao proposta.
+            // Assim '.', '-', letras, espacos, simbolos e o 12o digito nao
+            // passam a fazer parte do valor aceito pelo Credential Provider.
+            return E_INVALIDARG;
         }
 
         const bool changed =
@@ -750,6 +733,11 @@ if ($checkCredential.Contains('wcscmp(normalizedCpf, L"')) {
     throw "Validacao de CPF fixa encontrada."
 }
 
+$editableRewritePattern = '(?s)SetFieldString\(\s*this,\s*SFI_EDIT_TEXT'
+if ([regex]::IsMatch($checkCredential, $editableRewritePattern)) {
+    throw "Regressao: o Credential Provider voltou a reescrever o campo CPF."
+}
+
 if (-not $checkProvider.Contains('L"AlunoEGOV"') -or
     -not $checkProvider.Contains('L"AdminEGOV"')) {
     throw "Provider nao enumera as duas contas e-GOV."
@@ -760,7 +748,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v9.1 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.2 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
