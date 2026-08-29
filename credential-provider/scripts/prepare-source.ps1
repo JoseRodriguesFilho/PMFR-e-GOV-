@@ -269,11 +269,54 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
     if (dwFieldID == SFI_EDIT_TEXT)
     {
-        // IMPORTANTE:
-        // O campo editavel mantem SOMENTE os 11 digitos.
-        // Nao usamos SetFieldString() no proprio campo durante entrada valida,
-        // porque o LogonUI nao oferece API para preservar/reposicionar o caret.
-        // A mascara visual e mostrada em SFI_FULLNAME_TEXT, que e read-only.
+        if (_fUpdatingCpf)
+        {
+            return S_OK;
+        }
+
+        // Campo CPF: somente digitos, maximo 11.
+        // Digitacao numerica valida nao reescreve o campo.
+        wchar_t digits[12] = {};
+        size_t digitCount = 0;
+        bool needsRewrite = false;
+
+        for (PCWSTR p = pwz; *p != L'\0'; ++p)
+        {
+            if (*p >= L'0' && *p <= L'9')
+            {
+                if (digitCount < 11)
+                {
+                    digits[digitCount++] = *p;
+                }
+                else
+                {
+                    // 12o digito ou superior: descarta.
+                    needsRewrite = true;
+                }
+            }
+            else
+            {
+                // Letras, espacos, ponto, hifen e simbolos: descarta.
+                needsRewrite = true;
+            }
+        }
+
+        digits[digitCount] = L'\0';
+
+        // Reescreve o campo SOMENTE quando houver entrada invalida.
+        if (needsRewrite &&
+            _pCredProvCredentialEvents &&
+            wcscmp(pwz, digits) != 0)
+        {
+            _fUpdatingCpf = true;
+
+            _pCredProvCredentialEvents->SetFieldString(
+                this,
+                SFI_EDIT_TEXT,
+                digits);
+
+            _fUpdatingCpf = false;
+        }
 
         wchar_t previousDigits[12] = {};
 
@@ -285,34 +328,8 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 _rgFieldStrings[SFI_EDIT_TEXT]);
         }
 
-        const size_t inputLength = wcslen(pwz);
-
-        bool valid = (inputLength <= 11);
-
-        if (valid)
-        {
-            for (size_t i = 0; i < inputLength; ++i)
-            {
-                if (pwz[i] < L'0' || pwz[i] > L'9')
-                {
-                    valid = false;
-                    break;
-                }
-            }
-        }
-
-        if (!valid)
-        {
-            // NUNCA reescreve o CPFT_EDIT_TEXT aqui.
-            // Reescrever esse campo com SetFieldString() reposiciona o caret
-            // no LogonUI. Retornamos falha para rejeitar a alteracao proposta.
-            // Assim '.', '-', letras, espacos, simbolos e o 12o digito nao
-            // passam a fazer parte do valor aceito pelo Credential Provider.
-            return E_INVALIDARG;
-        }
-
         const bool changed =
-            wcscmp(previousDigits, pwz) != 0;
+            wcscmp(previousDigits, digits) != 0;
 
         PWSTR* stored =
             &_rgFieldStrings[SFI_EDIT_TEXT];
@@ -322,7 +339,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
         HRESULT hr =
             SHStrDupW(
-                pwz,
+                digits,
                 stored);
 
         if (FAILED(hr))
@@ -330,12 +347,10 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
             return hr;
         }
 
-        // Formata apenas para exibicao:
-        // 000.000.000-00
         wchar_t formatted[15] = {};
         size_t outPos = 0;
 
-        for (size_t i = 0; i < inputLength; ++i)
+        for (size_t i = 0; i < digitCount; ++i)
         {
             if (i == 3 || i == 6)
             {
@@ -346,14 +361,14 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 formatted[outPos++] = L'-';
             }
 
-            formatted[outPos++] = pwz[i];
+            formatted[outPos++] = digits[i];
         }
 
         formatted[outPos] = L'\0';
 
         wchar_t formattedLine[32] = {};
 
-        if (inputLength > 0)
+        if (digitCount > 0)
         {
             StringCchPrintfW(
                 formattedLine,
@@ -366,14 +381,12 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
         {
             _pCredProvCredentialEvents->BeginFieldUpdates();
 
-            // Atualiza somente campos read-only. Isso nao movimenta o caret
-            // do CPFT_EDIT_TEXT.
             _pCredProvCredentialEvents->SetFieldString(
                 this,
                 SFI_FULLNAME_TEXT,
                 formattedLine);
 
-            if (inputLength < 11)
+            if (digitCount < 11)
             {
                 _pCredProvCredentialEvents->SetFieldString(
                     this,
@@ -391,7 +404,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
                 LAB_AUTH_RESULT previewResult =
                     LabPreviewCpf(
-                        pwz,
+                        digits,
                         adminTarget,
                         &preview);
 
@@ -709,16 +722,28 @@ foreach ($needle in $requiredCredential) {
 
 $cpfInputChecks = @(
     @{
+        Name = "buffer CPF com 11 digitos"
+        Pattern = 'wchar_t\s+digits\[12\]\s*=\s*\{\s*\}\s*;'
+    },
+    @{
+        Name = "aceita somente 0-9"
+        Pattern = '\*p\s*>=\s*L''0''\s*&&\s*\*p\s*<=\s*L''9'''
+    },
+    @{
         Name = "limite de 11 digitos"
-        Pattern = 'bool\s+valid\s*=\s*\(inputLength\s*<=\s*11\)\s*;'
+        Pattern = 'digitCount\s*<\s*11'
     },
     @{
-        Name = "somente 0-9"
-        Pattern = 'pwz\[i\]\s*<\s*L''0''\s*\|\|\s*pwz\[i\]\s*>\s*L''9'''
+        Name = "saneia entrada invalida"
+        Pattern = 'needsRewrite\s*=\s*true\s*;'
     },
     @{
-        Name = "entrada invalida rejeitada"
-        Pattern = 'if\s*\(!valid\)\s*\{(?s:.*?)return\s+E_INVALIDARG\s*;'
+        Name = "reescreve somente valor numerico saneado"
+        Pattern = 'if\s*\(needsRewrite(?s:.*?)SetFieldString\(\s*this,\s*SFI_EDIT_TEXT,\s*digits\s*\)'
+    },
+    @{
+        Name = "preview usa somente digitos"
+        Pattern = 'LabPreviewCpf\(\s*digits\s*,'
     }
 )
 
@@ -740,9 +765,13 @@ if ($checkCredential.Contains('wcscmp(normalizedCpf, L"')) {
     throw "Validacao de CPF fixa encontrada."
 }
 
-$editableRewritePattern = '(?s)SetFieldString\(\s*this,\s*SFI_EDIT_TEXT'
-if ([regex]::IsMatch($checkCredential, $editableRewritePattern)) {
-    throw "Regressao: o Credential Provider voltou a reescrever o campo CPF."
+$rewriteMatches = [regex]::Matches(
+    $checkCredential,
+    '(?s)SetFieldString\(\s*this,\s*SFI_EDIT_TEXT\s*,'
+)
+
+if ($rewriteMatches.Count -ne 1) {
+    throw "Validacao CPF falhou: esperado exatamente 1 rewrite do campo CPF, somente para remover entrada invalida."
 }
 
 if (-not $checkProvider.Contains('L"AlunoEGOV"') -or
@@ -755,7 +784,7 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 }
 
 Write-Host ""
-Write-Host "e-GOV Login v9.4 preparado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.5 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
 Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
