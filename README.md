@@ -1,4 +1,4 @@
-# e-GOV Login v8.2
+# e-GOV Login v8.8
 
 Versao consolidada do login por CPF para Windows 11 Pro.
 
@@ -383,3 +383,115 @@ Microsoft com LF enquanto o script é interpretado com CRLF, fazendo
 
 A v8.2 usa regex tolerante a LF/CRLF tanto para o bloco
 `QualifiedUserName` quanto para o final de `GetSerialization`.
+
+
+## Correção v8.3
+
+Corrige a instalação em Windows x64 quando o `.cmd` é iniciado a partir de um
+processo 32-bit. Nesse cenário o Windows pode abrir o PowerShell 32-bit, no qual
+o módulo `Microsoft.PowerShell.LocalAccounts` não fica disponível.
+
+A v8.3:
+
+- força `WindowsPowerShell` 64-bit nos arquivos `.cmd`;
+- faz auto-reexecução em 64-bit caso algum `.ps1` seja iniciado em 32-bit;
+- valida explicitamente a presença de `Microsoft.PowerShell.LocalAccounts`;
+- mantém a criação das contas por SID/grupo sem depender do idioma do Windows.
+
+
+## Correção v8.4
+
+Corrige um BOM UTF-8 duplicado que podia ficar imediatamente antes de
+`#requires -Version 5.1` no `01_INSTALAR.ps1`. Nesse caso o Windows PowerShell
+interpretava a diretiva como um comando (`# requires`) em vez de comentário/diretiva.
+
+A v8.4 normaliza todos os `.ps1` para:
+
+1. exatamente um BOM UTF-8;
+2. `#requires -Version 5.1` como primeira linha textual;
+3. reexecução 64-bit somente depois da diretiva `#requires`.
+
+
+## Correção v8.5 — erros sempre visíveis
+
+Os `.cmd` agora abrem o Windows PowerShell 64-bit com `-NoExit`, então a
+janela não fecha quando ocorre um erro.
+
+Cada script grava também um arquivo `.log` na mesma pasta.
+
+Para trabalhar diretamente no PowerShell:
+
+```text
+00_ABRIR_POWERSHELL_ADMIN.cmd
+```
+
+Depois execute:
+
+```powershell
+.\01_INSTALAR.ps1
+```
+
+
+## Correção v8.6 — DPAPI no Windows PowerShell 5.1
+
+O instalador agora carrega explicitamente o assembly `System.Security` antes de
+usar:
+
+```powershell
+[System.Security.Cryptography.ProtectedData]
+[System.Security.Cryptography.DataProtectionScope]
+```
+
+Isso corrige o erro:
+
+```text
+Não é possível localizar o tipo [Security.Cryptography.ProtectedData]
+```
+
+As contas que já tenham sido criadas por uma tentativa anterior podem permanecer;
+é seguro executar `01_INSTALAR.ps1` novamente.
+
+
+## Correção v8.7 — DPAPI nativa
+
+A proteção das senhas locais não usa mais a classe .NET
+`System.Security.Cryptography.ProtectedData`.
+
+O instalador chama diretamente a API nativa do Windows:
+
+```text
+crypt32.dll -> CryptProtectData
+```
+
+com:
+
+```text
+CRYPTPROTECT_LOCAL_MACHINE
+CRYPTPROTECT_UI_FORBIDDEN
+```
+
+Isso elimina a dependência do assembly `System.Security` no Windows PowerShell 5.1.
+A DLL do Credential Provider continua lendo o mesmo blob com `CryptUnprotectData`.
+
+
+## Correção v8.8 — máscara de CPF
+
+O campo CPF agora foi ajustado para o comportamento:
+
+```text
+000.000.000-00
+```
+
+Regras:
+
+- o usuário digita somente `0` a `9`;
+- ponto e hífen são inseridos exclusivamente pelo Credential Provider;
+- máximo de 11 dígitos;
+- 12º dígito é rejeitado e o valor anterior é restaurado;
+- letras, espaços e símbolos são rejeitados;
+- ponto/hífen digitados manualmente são rejeitados;
+- ao apagar ou substituir números, a máscara é reconstruída a partir dos dígitos;
+- o campo não é reescrito pelo LogonUI em toda tecla: `SetFieldString` só é
+  chamado quando a pontuação realmente precisa mudar, reduzindo problemas de
+  cursor durante edição no meio do CPF;
+- `/auth/preview` só é consultado quando existem 11 dígitos e o CPF mudou.

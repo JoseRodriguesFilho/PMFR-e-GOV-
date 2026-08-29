@@ -1,5 +1,36 @@
-﻿﻿#requires -Version 5.1
+﻿#requires -Version 5.1
+# e-GOV Login requires 64-bit Windows PowerShell on x64 Windows.
+# Microsoft.PowerShell.LocalAccounts is not exposed to 32-bit PowerShell.
+if ([Environment]::Is64BitOperatingSystem -and [IntPtr]::Size -eq 4) {
+    $PowerShell64 = Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+
+    if (-not (Test-Path $PowerShell64)) {
+        throw "PowerShell 64-bit nao encontrado em $PowerShell64"
+    }
+
+    $p = Start-Process `
+        -FilePath $PowerShell64 `
+        -ArgumentList @(
+            "-NoProfile",
+            "-NoExit",
+            "-ExecutionPolicy", "Bypass",
+            "-File", "`"$PSCommandPath`""
+        ) `
+        -Wait `
+        -PassThru
+
+    exit $p.ExitCode
+}
+
 $ErrorActionPreference = "Stop"
+
+$LogPath = Join-Path $PSScriptRoot "01_INSTALAR.log"
+try {
+    Start-Transcript -Path $LogPath -Append -Force | Out-Null
+}
+catch {
+    # Nao interrompe o script se o transcript nao puder ser iniciado.
+}
 
 $Guid = "{D2D9E531-8DB1-4C83-ABF9-810F70A1EB09}"
 $OldGuid = "{5FD3D285-0DD9-4362-8855-E0ABAACD4AF6}"
@@ -27,7 +58,8 @@ function Ensure-Admin {
     $principal = New-Object Security.Principal.WindowsPrincipal($id)
 
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $PowerShell64 = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+        Start-Process $PowerShell64 -Verb RunAs -ArgumentList "-NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File `"$PSCommandPath`""
         exit
     }
 }
@@ -47,14 +79,110 @@ function New-RandomPassword {
 }
 
 function Protect-Secret([string]$PlainText) {
+    # Usa a API nativa do Windows (CryptProtectData), sem depender de
+    # System.Security.Cryptography.ProtectedData do .NET/PowerShell.
+    if (-not ("EGOV.NativeDpapi" -as [type])) {
+        $source = @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace EGOV
+{
+    public static class NativeDpapi
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DATA_BLOB
+        {
+            public int cbData;
+            public IntPtr pbData;
+        }
+
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CryptProtectData(
+            ref DATA_BLOB pDataIn,
+            string szDataDescr,
+            IntPtr pOptionalEntropy,
+            IntPtr pvReserved,
+            IntPtr pPromptStruct,
+            int dwFlags,
+            out DATA_BLOB pDataOut);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr LocalFree(IntPtr hMem);
+
+        private const int CRYPTPROTECT_UI_FORBIDDEN = 0x1;
+        private const int CRYPTPROTECT_LOCAL_MACHINE = 0x4;
+
+        public static byte[] Protect(byte[] input)
+        {
+            if (input == null)
+                throw new ArgumentNullException("input");
+
+            DATA_BLOB inBlob = new DATA_BLOB();
+            DATA_BLOB outBlob = new DATA_BLOB();
+
+            IntPtr inputPtr = IntPtr.Zero;
+
+            try
+            {
+                int length = input.Length;
+
+                // CryptProtectData aceita cbData=0, mas as senhas nunca devem ser vazias.
+                inputPtr = Marshal.AllocHGlobal(Math.Max(length, 1));
+
+                if (length > 0)
+                    Marshal.Copy(input, 0, inputPtr, length);
+
+                inBlob.cbData = length;
+                inBlob.pbData = inputPtr;
+
+                bool ok = CryptProtectData(
+                    ref inBlob,
+                    "e-GOV Login local secret",
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
+                    out outBlob);
+
+                if (!ok)
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+
+                byte[] result = new byte[outBlob.cbData];
+                Marshal.Copy(outBlob.pbData, result, 0, outBlob.cbData);
+                return result;
+            }
+            finally
+            {
+                if (inputPtr != IntPtr.Zero)
+                {
+                    // Limpa o buffer de entrada antes de liberar.
+                    for (int i = 0; i < input.Length; i++)
+                        Marshal.WriteByte(inputPtr, i, 0);
+
+                    Marshal.FreeHGlobal(inputPtr);
+                }
+
+                if (outBlob.pbData != IntPtr.Zero)
+                {
+                    // O blob protegido nao e plaintext, mas ainda liberamos corretamente.
+                    LocalFree(outBlob.pbData);
+                }
+            }
+        }
+    }
+}
+"@
+
+        Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
+    }
+
     $bytes = [Text.Encoding]::Unicode.GetBytes($PlainText)
 
     try {
-        return [Security.Cryptography.ProtectedData]::Protect(
-            $bytes,
-            $null,
-            [Security.Cryptography.DataProtectionScope]::LocalMachine
-        )
+        return [EGOV.NativeDpapi]::Protect($bytes)
     }
     finally {
         [Array]::Clear($bytes, 0, $bytes.Length)
@@ -67,7 +195,23 @@ function Ensure-LocalAccount(
     [bool]$IsAdmin,
     [string]$Password
 ) {
-    Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
+    $localAccounts = Get-Module -ListAvailable -Name Microsoft.PowerShell.LocalAccounts |
+        Select-Object -First 1
+
+    if ($null -eq $localAccounts) {
+        $modulePath = Join-Path $env:WINDIR `
+            "System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.LocalAccounts\Microsoft.PowerShell.LocalAccounts.psd1"
+
+        if (Test-Path $modulePath) {
+            Import-Module $modulePath -ErrorAction Stop
+        }
+        else {
+            throw "Modulo Microsoft.PowerShell.LocalAccounts nao encontrado. Processo 64-bit: $([Environment]::Is64BitProcess). Windows 64-bit: $([Environment]::Is64BitOperatingSystem)."
+        }
+    }
+    else {
+        Import-Module Microsoft.PowerShell.LocalAccounts -ErrorAction Stop
+    }
 
     $secure = ConvertTo-SecureString $Password -AsPlainText -Force
     $user = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue
@@ -175,7 +319,7 @@ if (-not (Test-Path $AgentSource)) {
 }
 
 Write-Host ""
-Write-Host "Instalando e-GOV Login v8..." -ForegroundColor Cyan
+Write-Host "Instalando e-GOV Login v8.7..." -ForegroundColor Cyan
 Write-Host ""
 
 $studentPassword = New-RandomPassword
