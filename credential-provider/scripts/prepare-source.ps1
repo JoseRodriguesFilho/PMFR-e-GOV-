@@ -783,12 +783,8 @@ $cpfInputChecks = @(
         Pattern = 'digitCount\s*<\s*11'
     },
     @{
-        Name = "saneia entrada invalida"
-        Pattern = 'needsRewrite\s*=\s*true\s*;'
-    },
-    @{
-        Name = "reescreve somente valor numerico saneado"
-        Pattern = 'if\s*\(needsRewrite(?s:.*?)SetFieldString\(\s*this,\s*SFI_EDIT_TEXT,\s*digits\s*\)'
+        Name = "armazena somente digitos"
+        Pattern = 'SHStrDupW\(\s*digits\s*,\s*stored\s*\)'
     },
     @{
         Name = "preview usa somente digitos"
@@ -819,8 +815,8 @@ $rewriteMatches = [regex]::Matches(
     '(?s)SetFieldString\(\s*this,\s*SFI_EDIT_TEXT\s*,'
 )
 
-if ($rewriteMatches.Count -ne 1) {
-    throw "Validacao CPF falhou: esperado exatamente 1 rewrite do campo CPF, somente para remover entrada invalida."
+if ($rewriteMatches.Count -ne 0) {
+    throw "Validacao CPF falhou: o input nao deve ser reescrito, pois o LogonUI move o cursor para o inicio."
 }
 
 if (-not $checkProvider.Contains('L"AlunoEGOV"') -or
