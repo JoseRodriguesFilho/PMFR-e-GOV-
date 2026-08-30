@@ -56,6 +56,18 @@ public sealed class SessionContext
     public string Action { get; set; } = "";
     public DateTimeOffset AddedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset LastHeartbeat { get; set; } = DateTimeOffset.MinValue;
+    public DateTimeOffset? TerminationDeadline { get; set; }
+    public string TerminationMessage { get; set; } = "";
+    public bool TerminationNotified { get; set; }
+}
+
+public sealed class HeartbeatResponse
+{
+    public bool Ok { get; set; }
+    public string? Command { get; set; }
+    public DateTimeOffset? TerminationDeadline { get; set; }
+    public string? TerminationMessage { get; set; }
+    public int? SecondsRemaining { get; set; }
 }
 
 public sealed class AgentWorker : BackgroundService
@@ -193,6 +205,78 @@ public sealed class AgentWorker : BackgroundService
 
                 foreach (var session in snapshot)
                 {
+                    if (session.TerminationDeadline is not null)
+                    {
+                        if (DateTimeOffset.UtcNow < session.TerminationDeadline.Value &&
+                            DateTimeOffset.UtcNow - session.LastHeartbeat >=
+                            TimeSpan.FromSeconds(5))
+                        {
+                            var refreshed = await SendHeartbeatAsync(session, token);
+                            if (refreshed)
+                            {
+                                lock (_sync)
+                                {
+                                    var current = _sessions.FirstOrDefault(
+                                        x => x.SessionId.Equals(
+                                            session.SessionId,
+                                            StringComparison.OrdinalIgnoreCase));
+                                    if (current is not null)
+                                    {
+                                        current.LastHeartbeat = DateTimeOffset.UtcNow;
+                                        SaveStateUnsafe();
+                                    }
+                                }
+                            }
+
+                            // Usa o estado atualizado no proximo ciclo, inclusive
+                            // quando o administrador cancelou o encerramento.
+                            continue;
+                        }
+
+                        if (!session.TerminationNotified)
+                        {
+                            var remaining = Math.Max(
+                                0,
+                                (int)Math.Ceiling(
+                                    (session.TerminationDeadline.Value -
+                                     DateTimeOffset.UtcNow).TotalSeconds));
+
+                            WindowsSessionInspector.TrySendMessage(
+                                session.WindowsAccount,
+                                "e-GOV - Encerramento de sessao",
+                                session.TerminationMessage +
+                                $"\n\nEncerramento em {remaining} segundos.",
+                                remaining);
+
+                            lock (_sync)
+                            {
+                                var current = _sessions.FirstOrDefault(
+                                    x => x.SessionId.Equals(
+                                        session.SessionId,
+                                        StringComparison.OrdinalIgnoreCase));
+                                if (current is not null)
+                                {
+                                    current.TerminationNotified = true;
+                                    SaveStateUnsafe();
+                                }
+                            }
+                        }
+
+                        if (DateTimeOffset.UtcNow >= session.TerminationDeadline.Value)
+                        {
+                            if (WindowsSessionInspector.TryLogoff(
+                                    session.WindowsAccount))
+                            {
+                                await SendLogoutAsync(
+                                    session,
+                                    "remote_termination",
+                                    token);
+                                RemoveSession(session.SessionId);
+                            }
+                            continue;
+                        }
+                    }
+
                     if (!WindowsSessionInspector.IsUserLoggedOn(session.WindowsAccount))
                     {
                         // O Credential Provider avisa o Agent imediatamente antes de o
@@ -284,7 +368,54 @@ public sealed class AgentWorker : BackgroundService
             using var response = await _http.SendAsync(request, token);
 
             if (response.IsSuccessStatusCode)
+            {
+                var heartbeat = await response.Content.ReadFromJsonAsync<HeartbeatResponse>(
+                    JsonOptions(),
+                    token);
+
+                lock (_sync)
+                {
+                    var current = _sessions.FirstOrDefault(
+                        x => x.SessionId.Equals(
+                            session.SessionId,
+                            StringComparison.OrdinalIgnoreCase));
+
+                    if (current is not null)
+                    {
+                        var terminate = heartbeat?.Command?.Equals(
+                            "terminate",
+                            StringComparison.OrdinalIgnoreCase) == true;
+
+                        if (terminate)
+                        {
+                            var changed =
+                                current.TerminationDeadline != heartbeat!.TerminationDeadline ||
+                                !string.Equals(
+                                    current.TerminationMessage,
+                                    heartbeat.TerminationMessage ?? "",
+                                    StringComparison.Ordinal);
+
+                            current.TerminationDeadline = heartbeat.TerminationDeadline;
+                            current.TerminationMessage =
+                                heartbeat.TerminationMessage ??
+                                "Sua sessao sera encerrada pelo administrador.";
+
+                            if (changed)
+                                current.TerminationNotified = false;
+                        }
+                        else
+                        {
+                            current.TerminationDeadline = null;
+                            current.TerminationMessage = "";
+                            current.TerminationNotified = false;
+                        }
+
+                        SaveStateUnsafe();
+                    }
+                }
+
                 return true;
+            }
 
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict)
             {
@@ -373,7 +504,10 @@ public sealed class AgentWorker : BackgroundService
         Role = s.Role,
         Action = s.Action,
         AddedAt = s.AddedAt,
-        LastHeartbeat = s.LastHeartbeat
+        LastHeartbeat = s.LastHeartbeat,
+        TerminationDeadline = s.TerminationDeadline,
+        TerminationMessage = s.TerminationMessage,
+        TerminationNotified = s.TerminationNotified
     };
 
     private void LoadState()
@@ -544,6 +678,81 @@ public static class WindowsSessionInspector
         }
     }
 
+    public static bool TrySendMessage(
+        string expectedUser,
+        string title,
+        string message,
+        int secondsRemaining)
+    {
+        if (!TryFindSessionId(expectedUser, out var sessionId))
+            return false;
+
+        var timeout = Math.Max(5, Math.Min(secondsRemaining, 300));
+        return WTSSendMessageW(
+            WtsCurrentServerHandle,
+            sessionId,
+            title,
+            title.Length * sizeof(char),
+            message,
+            message.Length * sizeof(char),
+            0x00000000 | 0x00000030,
+            timeout,
+            out _,
+            false);
+    }
+
+    public static bool TryLogoff(string expectedUser)
+    {
+        return TryFindSessionId(expectedUser, out var sessionId) &&
+               WTSLogoffSession(
+                   WtsCurrentServerHandle,
+                   sessionId,
+                   false);
+    }
+
+    private static bool TryFindSessionId(string expectedUser, out int sessionId)
+    {
+        sessionId = -1;
+        IntPtr sessionInfo = IntPtr.Zero;
+
+        try
+        {
+            if (!WTSEnumerateSessionsW(
+                    WtsCurrentServerHandle,
+                    0,
+                    1,
+                    out sessionInfo,
+                    out var count))
+            {
+                return false;
+            }
+
+            var dataSize = Marshal.SizeOf<WTS_SESSION_INFO>();
+            var current = sessionInfo;
+
+            for (var i = 0; i < count; i++)
+            {
+                var info = Marshal.PtrToStructure<WTS_SESSION_INFO>(current);
+
+                if (TryGetSessionUser(info.SessionID, out var user) &&
+                    user.Equals(expectedUser, StringComparison.OrdinalIgnoreCase))
+                {
+                    sessionId = info.SessionID;
+                    return true;
+                }
+
+                current = IntPtr.Add(current, dataSize);
+            }
+
+            return false;
+        }
+        finally
+        {
+            if (sessionInfo != IntPtr.Zero)
+                WTSFreeMemory(sessionInfo);
+        }
+    }
+
     private static bool TryGetSessionUser(int sessionId, out string user)
     {
         user = "";
@@ -624,6 +833,25 @@ public static class WindowsSessionInspector
 
     [DllImport("Wtsapi32.dll")]
     private static extern void WTSFreeMemory(IntPtr memory);
+
+    [DllImport("Wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool WTSSendMessageW(
+        IntPtr server,
+        int sessionId,
+        string title,
+        int titleLength,
+        string message,
+        int messageLength,
+        int style,
+        int timeout,
+        out int response,
+        bool wait);
+
+    [DllImport("Wtsapi32.dll", SetLastError = true)]
+    private static extern bool WTSLogoffSession(
+        IntPtr server,
+        int sessionId,
+        bool wait);
 }
 
 public static class Program
