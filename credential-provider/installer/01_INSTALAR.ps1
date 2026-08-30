@@ -182,10 +182,48 @@ namespace EGOV
     $bytes = [Text.Encoding]::Unicode.GetBytes($PlainText)
 
     try {
-        return [EGOV.NativeDpapi]::Protect($bytes)
+        $blob = [EGOV.NativeDpapi]::Protect($bytes)
+        return ,([byte[]]$blob)
     }
     finally {
         [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
+
+function Set-Registry64Binary(
+    [string]$SubKey,
+    [string]$Name,
+    [byte[]]$Value
+) {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine,
+        [Microsoft.Win32.RegistryView]::Registry64
+    )
+
+    try {
+        $key = $base.CreateSubKey(
+            $SubKey,
+            [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree
+        )
+
+        if ($null -eq $key) {
+            throw "Nao foi possivel abrir HKLM:\$SubKey em Registry64."
+        }
+
+        try {
+            $key.SetValue(
+                $Name,
+                [byte[]]$Value,
+                [Microsoft.Win32.RegistryValueKind]::Binary
+            )
+        }
+        finally {
+            $key.Dispose()
+        }
+    }
+    finally {
+        $base.Dispose()
     }
 }
 
@@ -319,7 +357,7 @@ if (-not (Test-Path $AgentSource)) {
 }
 
 Write-Host ""
-Write-Host "Instalando e-GOV Login v8.7..." -ForegroundColor Cyan
+Write-Host "Instalando e-GOV Login v9.5" -ForegroundColor Cyan
 Write-Host ""
 
 $studentPassword = New-RandomPassword
@@ -342,19 +380,15 @@ Protect-ConfigRegistry
 $studentProtected = Protect-Secret $studentPassword
 $adminProtected = Protect-Secret $adminPassword
 
-New-ItemProperty `
-    $ConfigKey `
-    -Name StudentSecret `
-    -PropertyType Binary `
-    -Value $studentProtected `
-    -Force | Out-Null
+Set-Registry64Binary `
+    -SubKey "SOFTWARE\e-GOV\LabCPFProvider" `
+    -Name "StudentSecret" `
+    -Value ([byte[]]$studentProtected)
 
-New-ItemProperty `
-    $ConfigKey `
-    -Name AdminSecret `
-    -PropertyType Binary `
-    -Value $adminProtected `
-    -Force | Out-Null
+Set-Registry64Binary `
+    -SubKey "SOFTWARE\e-GOV\LabCPFProvider" `
+    -Name "AdminSecret" `
+    -Value ([byte[]]$adminProtected)
 
 $studentPassword = $null
 $adminPassword = $null
@@ -446,6 +480,6 @@ if (-not ($studentOk -and $adminOk -and $dllOk -and $providerOk -and $agentOk)) 
     throw "Instalacao incompleta."
 }
 
-Write-Host "e-GOV Login v8 instalado." -ForegroundColor Green
+Write-Host "e-GOV Login v9.5 instalado." -ForegroundColor Green
 Write-Host "Agora execute 02_CONFIGURAR_API.cmd." -ForegroundColor Cyan
 Read-Host "ENTER para fechar"

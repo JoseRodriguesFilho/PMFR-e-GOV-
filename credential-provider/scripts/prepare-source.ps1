@@ -232,14 +232,35 @@ $titleBlock = @'
 
     if (SUCCEEDED(hr))
     {
-        PCWSTR tileTitle =
-            LabIsAccount(_pszQualifiedUserName, L"AdminEGOV")
-                ? L"Admin e-GOV"
-                : L"Aluno e-GOV";
+        const bool adminTarget =
+            LabIsAccount(_pszQualifiedUserName, L"AdminEGOV");
+
+        PCWSTR tileTitle = adminTarget ? L"Admin e-GOV" : L"";
+        std::wstring maintenanceText;
+
+        if (!adminTarget)
+        {
+            LAB_AUTH_RESPONSE status;
+
+            if (LabGetStatus(&status) == LAB_AUTH_OK && status.maintenance)
+            {
+                tileTitle = L"Manutenção";
+                maintenanceText = status.maintenanceMessage;
+            }
+        }
 
         CoTaskMemFree(_rgFieldStrings[SFI_LARGE_TEXT]);
         _rgFieldStrings[SFI_LARGE_TEXT] = nullptr;
         hr = SHStrDupW(tileTitle, &_rgFieldStrings[SFI_LARGE_TEXT]);
+
+        if (SUCCEEDED(hr) && !maintenanceText.empty())
+        {
+            CoTaskMemFree(_rgFieldStrings[SFI_DISPLAYNAME_TEXT]);
+            _rgFieldStrings[SFI_DISPLAYNAME_TEXT] = nullptr;
+            hr = SHStrDupW(
+                maintenanceText.c_str(),
+                &_rgFieldStrings[SFI_DISPLAYNAME_TEXT]);
+        }
     }
 '@
 
@@ -278,7 +299,6 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
         // Digitacao numerica valida nao reescreve o campo.
         wchar_t digits[12] = {};
         size_t digitCount = 0;
-        bool needsRewrite = false;
 
         for (PCWSTR p = pwz; *p != L'\0'; ++p)
         {
@@ -291,32 +311,20 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 else
                 {
                     // 12o digito ou superior: descarta.
-                    needsRewrite = true;
                 }
             }
             else
             {
                 // Letras, espacos, ponto, hifen e simbolos: descarta.
-                needsRewrite = true;
             }
         }
 
         digits[digitCount] = L'\0';
 
-        // Reescreve o campo SOMENTE quando houver entrada invalida.
-        if (needsRewrite &&
-            _pCredProvCredentialEvents &&
-            wcscmp(pwz, digits) != 0)
-        {
-            _fUpdatingCpf = true;
-
-            _pCredProvCredentialEvents->SetFieldString(
-                this,
-                SFI_EDIT_TEXT,
-                digits);
-
-            _fUpdatingCpf = false;
-        }
+        // Nao reescreve o controle durante a digitacao. O LogonUI move o
+        // cursor para o inicio quando SetFieldString altera o proprio input.
+        // Pontuacao e outros caracteres ficam apenas na exibicao; o valor
+        // armazenado e enviado para a API contem somente os digitos acima.
 
         wchar_t previousDigits[12] = {};
 
@@ -388,10 +396,30 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
             if (digitCount < 11)
             {
-                _pCredProvCredentialEvents->SetFieldString(
-                    this,
-                    SFI_DISPLAYNAME_TEXT,
-                    L"");
+                const bool adminTarget =
+                    LabIsAccount(
+                        _pszQualifiedUserName,
+                        L"AdminEGOV");
+
+                const bool showingMaintenance =
+                    !adminTarget &&
+                    _rgFieldStrings[SFI_LARGE_TEXT] != nullptr &&
+                    wcscmp(
+                        _rgFieldStrings[SFI_LARGE_TEXT],
+                        L"Manutenção") == 0;
+
+                if (!showingMaintenance)
+                {
+                    _pCredProvCredentialEvents->SetFieldString(
+                        this,
+                        SFI_LARGE_TEXT,
+                        adminTarget ? L"Admin e-GOV" : L"");
+
+                    _pCredProvCredentialEvents->SetFieldString(
+                        this,
+                        SFI_DISPLAYNAME_TEXT,
+                        L"");
+                }
             }
             else if (changed)
             {
@@ -409,14 +437,28 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                         &preview);
 
                 PCWSTR previewText = L"";
+                std::wstring greeting;
+                std::wstring courseLine;
 
                 if (previewResult == LAB_AUTH_OK)
                 {
-                    if (preview.allowed &&
+                    if (preview.maintenance)
+                    {
+                        courseLine = L"Manutenção";
+                        previewText = preview.maintenanceMessage.empty()
+                            ? preview.message.c_str()
+                            : preview.maintenanceMessage.c_str();
+                    }
+                    else if (preview.allowed &&
                         !preview.name.empty())
                     {
-                        previewText =
-                            preview.name.c_str();
+                        greeting = L"Olá, " + preview.name + L"!";
+                        previewText = greeting.c_str();
+
+                        if (!adminTarget && !preview.course.empty())
+                        {
+                            courseLine = L"Curso: " + preview.course;
+                        }
                     }
                     else if (!preview.message.empty())
                     {
@@ -447,6 +489,13 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                     this,
                     SFI_DISPLAYNAME_TEXT,
                     previewText);
+
+                _pCredProvCredentialEvents->SetFieldString(
+                    this,
+                    SFI_LARGE_TEXT,
+                    adminTarget
+                        ? L"Admin e-GOV"
+                        : courseLine.c_str());
             }
 
             _pCredProvCredentialEvents->EndFieldUpdates();

@@ -17,15 +17,21 @@ struct LAB_AUTH_RESPONSE
     bool authorized = false;
     bool recognized = false;
     bool allowed = false;
+    bool maintenance = false;
 
     std::wstring reason;
     std::wstring message;
     std::wstring name;
     std::wstring role;
+    std::wstring course;
+    std::wstring maintenanceMessage;
     std::wstring sessionId;
     std::wstring action;
     std::wstring windowsAccount;
 };
+
+LAB_AUTH_RESULT LabGetStatus(
+    _Out_ LAB_AUTH_RESPONSE* response);
 
 LAB_AUTH_RESULT LabPreviewCpf(
     _In_z_ PCWSTR cpf,

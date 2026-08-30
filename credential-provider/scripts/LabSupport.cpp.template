@@ -529,10 +529,19 @@ namespace
             "allowed",
             false);
 
+        response->maintenance = JsonBool(
+            json,
+            "maintenance",
+            false);
+
         response->reason = JsonString(json, "reason");
         response->message = JsonString(json, "message");
         response->name = JsonString(json, "name");
         response->role = JsonString(json, "role");
+        response->course = JsonString(json, "course");
+        response->maintenanceMessage = JsonString(
+            json,
+            "maintenance_message");
         response->sessionId = JsonString(json, "session_id");
         response->action = JsonString(json, "action");
         response->windowsAccount = JsonString(
@@ -799,6 +808,17 @@ namespace
 
         return LAB_AUTH_OK;
     }
+}
+
+LAB_AUTH_RESULT LabGetStatus(
+    LAB_AUTH_RESPONSE* response)
+{
+    // Reutiliza o transporte autenticado; /status ignora o corpo da requisicao.
+    return PostJson(
+        L"/status",
+        L"0",
+        false,
+        response);
 }
 
 LAB_AUTH_RESULT LabPreviewCpf(
