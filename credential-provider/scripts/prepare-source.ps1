@@ -395,7 +395,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
         }
         else if (excessDigits > 0)
         {
-            hintText = L"O CPF tem 11 números. Apague os que sobraram.";
+            hintText = L"CPF inválido. Confira os números digitados.";
         }
         else if (digitCount == 11 && !checkDigitsOk)
         {
@@ -604,14 +604,14 @@ $authBlock = @'
 
     if (_fCpfInvalidChars || invalidCpfChars || excessCpfDigits > 0)
     {
-        SHStrDupW(L"CPF inválido. Digite apenas os 11 números.", ppwszOptionalStatusText);
+        SHStrDupW(L"CPF inválido.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
 
     if (cpfCount != 11)
     {
-        SHStrDupW(L"CPF incompleto. Digite os 11 números.", ppwszOptionalStatusText);
+        SHStrDupW(L"CPF inválido.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
