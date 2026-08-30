@@ -299,6 +299,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
         // Digitacao numerica valida nao reescreve o campo.
         wchar_t digits[12] = {};
         size_t digitCount = 0;
+        bool invalidInput = false;
 
         for (PCWSTR p = pwz; *p != L'\0'; ++p)
         {
@@ -310,12 +311,14 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 }
                 else
                 {
-                    // 12o digito ou superior: descarta.
+                    // 12o digito ou superior invalida toda a entrada.
+                    invalidInput = true;
                 }
             }
             else
             {
-                // Letras, espacos, ponto, hifen e simbolos: descarta.
+                // Letras, espacos, ponto, hifen e simbolos invalidam a entrada.
+                invalidInput = true;
             }
         }
 
@@ -323,8 +326,8 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
         // Nao reescreve o controle durante a digitacao. O LogonUI move o
         // cursor para o inicio quando SetFieldString altera o proprio input.
-        // Pontuacao e outros caracteres ficam apenas na exibicao; o valor
-        // armazenado e enviado para a API contem somente os digitos acima.
+        // Pontuacao e outros caracteres podem permanecer apenas visualmente,
+        // mas invalidam o CPF e nunca sao enviados para autenticacao.
 
         wchar_t previousDigits[12] = {};
 
@@ -336,8 +339,10 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 _rgFieldStrings[SFI_EDIT_TEXT]);
         }
 
+        PCWSTR validatedDigits = invalidInput ? L"" : digits;
+
         const bool changed =
-            wcscmp(previousDigits, digits) != 0;
+            wcscmp(previousDigits, validatedDigits) != 0;
 
         PWSTR* stored =
             &_rgFieldStrings[SFI_EDIT_TEXT];
@@ -347,7 +352,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
         HRESULT hr =
             SHStrDupW(
-                digits,
+                validatedDigits,
                 stored);
 
         if (FAILED(hr))
@@ -376,7 +381,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
         wchar_t formattedLine[32] = {};
 
-        if (digitCount > 0)
+        if (digitCount > 0 && !invalidInput)
         {
             StringCchPrintfW(
                 formattedLine,
@@ -394,7 +399,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 SFI_FULLNAME_TEXT,
                 formattedLine);
 
-            if (digitCount < 11)
+            if (digitCount < 11 || invalidInput)
             {
                 const bool adminTarget =
                     LabIsAccount(
@@ -418,7 +423,9 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                     _pCredProvCredentialEvents->SetFieldString(
                         this,
                         SFI_DISPLAYNAME_TEXT,
-                        L"");
+                        invalidInput
+                            ? L"Digite somente os 11 números do CPF."
+                            : L"");
                 }
             }
             else if (changed)
@@ -783,8 +790,16 @@ $cpfInputChecks = @(
         Pattern = 'digitCount\s*<\s*11'
     },
     @{
-        Name = "armazena somente digitos"
-        Pattern = 'SHStrDupW\(\s*digits\s*,\s*stored\s*\)'
+        Name = "invalida caracteres nao numericos"
+        Pattern = 'invalidInput\s*=\s*true\s*;'
+    },
+    @{
+        Name = "nao armazena CPF quando entrada for invalida"
+        Pattern = 'validatedDigits\s*=\s*invalidInput\s*\?\s*L""\s*:\s*digits'
+    },
+    @{
+        Name = "armazena somente CPF validado"
+        Pattern = 'SHStrDupW\(\s*validatedDigits\s*,\s*stored\s*\)'
     },
     @{
         Name = "preview usa somente digitos"
@@ -831,5 +846,5 @@ if (-not $checkSupport.Contains('CryptUnprotectData')) {
 Write-Host ""
 Write-Host "e-GOV Login v9.5 preparado." -ForegroundColor Green
 Write-Host "Tiles: Aluno e-GOV / Admin e-GOV" -ForegroundColor Green
-Write-Host "CPF: mascara automatica + API" -ForegroundColor Green
+Write-Host "CPF: 11 numeros obrigatorios + API" -ForegroundColor Green
 Write-Host "Senha: DPAPI LocalMachine (nao embutida na DLL)" -ForegroundColor Green
