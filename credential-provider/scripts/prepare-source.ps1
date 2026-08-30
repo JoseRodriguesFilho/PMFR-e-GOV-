@@ -116,7 +116,7 @@ $proj = $proj.Replace(
 Set-Content $projPath $proj -Encoding UTF8
 
 # ---------------------------------------------------------------------------
-# Credential header: flag contra reentrada ao aplicar mascara.
+# Credential header: memoria do ultimo estado invalido digitado no campo CPF.
 # ---------------------------------------------------------------------------
 $credHeaderPath = Join-Path $out "CSampleCredential.h"
 $h = Get-Content $credHeaderPath -Raw
@@ -129,7 +129,7 @@ if (-not $h.Contains($headerNeedle)) {
 
 $h = $h.Replace(
     $headerNeedle,
-    $headerNeedle + "`r`n    bool                                    _fUpdatingCpf;                                  // Prevent recursive UI update while applying CPF mask")
+    $headerNeedle + "`r`n    bool                                    _fCpfInvalidChars;                              // Last CPF input had invalid characters or extra digits")
 
 Set-Content $credHeaderPath $h -Encoding UTF8
 
@@ -150,7 +150,7 @@ if (-not $x.Contains($ctorNeedle)) {
 
 $x = $x.Replace(
     $ctorNeedle,
-    "_fShowControls(false),`r`n    _fUpdatingCpf(false),")
+    "_fShowControls(false),`r`n    _fCpfInvalidChars(false),")
 
 $x = $x.Replace(
     'SHStrDupW(L"Sample Credential", &_rgFieldStrings[SFI_LABEL])',
@@ -290,44 +290,31 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
     if (dwFieldID == SFI_EDIT_TEXT)
     {
-        if (_fUpdatingCpf)
-        {
-            return S_OK;
-        }
-
-        // Campo CPF: somente digitos, maximo 11.
-        // Digitacao numerica valida nao reescreve o campo.
+        // Campo CPF: pontos, hifens, barras e espacos sao ignorados, de modo
+        // que um CPF colado ja formatado seja aceito. Letras, simbolos e
+        // digitos alem do 11o invalidam a entrada.
+        //
+        // O controle nunca e reescrito: o LogonUI devolve o cursor para o
+        // inicio sempre que SetFieldString altera o proprio input. A
+        // confirmacao visual fica no eco mascarado em SFI_FULLNAME_TEXT.
         wchar_t digits[12] = {};
         size_t digitCount = 0;
-        bool invalidInput = false;
+        bool invalidChars = false;
+        size_t excessDigits = 0;
 
-        for (PCWSTR p = pwz; *p != L'\0'; ++p)
-        {
-            if (*p >= L'0' && *p <= L'9')
-            {
-                if (digitCount < 11)
-                {
-                    digits[digitCount++] = *p;
-                }
-                else
-                {
-                    // 12o digito ou superior invalida toda a entrada.
-                    invalidInput = true;
-                }
-            }
-            else
-            {
-                // Letras, espacos, ponto, hifen e simbolos invalidam a entrada.
-                invalidInput = true;
-            }
-        }
+        LabCpfExtractDigits(
+            pwz,
+            digits,
+            &digitCount,
+            &invalidChars,
+            &excessDigits);
 
-        digits[digitCount] = L'\0';
+        const bool invalidInput =
+            invalidChars || excessDigits > 0;
 
-        // Nao reescreve o controle durante a digitacao. O LogonUI move o
-        // cursor para o inicio quando SetFieldString altera o proprio input.
-        // Pontuacao e outros caracteres podem permanecer apenas visualmente,
-        // mas invalidam o CPF e nunca sao enviados para autenticacao.
+        // Lembrado para o GetSerialization distinguir "digitou lixo"
+        // de "digitou poucos numeros".
+        _fCpfInvalidChars = invalidInput;
 
         wchar_t previousDigits[12] = {};
 
@@ -381,13 +368,38 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 
         wchar_t formattedLine[32] = {};
 
-        if (digitCount > 0 && !invalidInput)
+        // O eco continua visivel mesmo com entrada invalida: e a unica
+        // confirmacao que o usuario tem de quais numeros foram entendidos,
+        // justamente quando ele precisa corrigir alguma coisa.
+        if (digitCount > 0)
         {
             StringCchPrintfW(
                 formattedLine,
                 ARRAYSIZE(formattedLine),
                 L"CPF: %s",
                 formatted);
+        }
+
+        // Confere os digitos verificadores localmente. Erro de digitacao
+        // e respondido na hora, sem a chamada HTTP sincrona do preview.
+        const bool checkDigitsOk =
+            !invalidInput &&
+            digitCount == 11 &&
+            LabCpfCheckDigitsOk(digits);
+
+        PCWSTR hintText = L"";
+
+        if (invalidChars)
+        {
+            hintText = L"Digite apenas números. Pontos e traços são opcionais.";
+        }
+        else if (excessDigits > 0)
+        {
+            hintText = L"O CPF tem 11 números. Apague os que sobraram.";
+        }
+        else if (digitCount == 11 && !checkDigitsOk)
+        {
+            hintText = L"CPF inválido. Confira os números digitados.";
         }
 
         if (_pCredProvCredentialEvents)
@@ -399,7 +411,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                 SFI_FULLNAME_TEXT,
                 formattedLine);
 
-            if (digitCount < 11 || invalidInput)
+            if (!checkDigitsOk)
             {
                 const bool adminTarget =
                     LabIsAccount(
@@ -423,9 +435,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                     _pCredProvCredentialEvents->SetFieldString(
                         this,
                         SFI_DISPLAYNAME_TEXT,
-                        invalidInput
-                            ? L"Digite somente os 11 números do CPF."
-                            : L"");
+                        hintText);
                 }
             }
             else if (changed)
@@ -477,19 +487,19 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
                          LAB_AUTH_SERVICE_UNAVAILABLE)
                 {
                     previewText =
-                        L"Servico de autenticacao indisponivel.";
+                        L"Serviço de autenticação indisponível.";
                 }
                 else if (previewResult ==
                          LAB_AUTH_NOT_CONFIGURED)
                 {
                     previewText =
-                        L"API nao configurada.";
+                        L"API de autenticação não configurada.";
                 }
                 else if (previewResult ==
                          LAB_AUTH_CLIENT_UNAUTHORIZED)
                 {
                     previewText =
-                        L"Computador nao autorizado.";
+                        L"Este computador não foi autorizado.";
                 }
 
                 _pCredProvCredentialEvents->SetFieldString(
@@ -556,7 +566,7 @@ $authBlock = @'
 
     if (!_fIsLocalUser)
     {
-        SHStrDupW(L"Conta e-GOV local nao encontrada.", ppwszOptionalStatusText);
+        SHStrDupW(L"Conta e-GOV local não encontrada.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
@@ -573,46 +583,42 @@ $authBlock = @'
 
     if (!adminTarget && !studentTarget)
     {
-        SHStrDupW(L"Conta e-GOV invalida.", ppwszOptionalStatusText);
+        SHStrDupW(L"Conta e-GOV inválida.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
 
+    // Mesma normalizacao usada durante a digitacao, para que o erro
+    // apresentado aqui corresponda ao que o usuario viu na tela.
     wchar_t normalizedCpf[12] = {};
-    size_t cpfPos = 0;
-    bool invalidCpfChar = false;
+    size_t cpfCount = 0;
+    bool invalidCpfChars = false;
+    size_t excessCpfDigits = 0;
 
-    if (_rgFieldStrings[SFI_EDIT_TEXT] != nullptr)
+    LabCpfExtractDigits(
+        _rgFieldStrings[SFI_EDIT_TEXT],
+        normalizedCpf,
+        &cpfCount,
+        &invalidCpfChars,
+        &excessCpfDigits);
+
+    if (_fCpfInvalidChars || invalidCpfChars || excessCpfDigits > 0)
     {
-        for (PCWSTR p = _rgFieldStrings[SFI_EDIT_TEXT];
-             *p != L'\0';
-             ++p)
-        {
-            if (*p >= L'0' && *p <= L'9')
-            {
-                if (cpfPos >= 11)
-                {
-                    cpfPos = 12;
-                    break;
-                }
-
-                normalizedCpf[cpfPos++] = *p;
-            }
-            else if (*p == L'.' || *p == L'-')
-            {
-                // Mascara.
-            }
-            else
-            {
-                invalidCpfChar = true;
-                break;
-            }
-        }
+        SHStrDupW(L"CPF inválido. Digite apenas os 11 números.", ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        return S_OK;
     }
 
-    if (invalidCpfChar || cpfPos != 11)
+    if (cpfCount != 11)
     {
-        SHStrDupW(L"CPF invalido.", ppwszOptionalStatusText);
+        SHStrDupW(L"CPF incompleto. Digite os 11 números.", ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        return S_OK;
+    }
+
+    if (!LabCpfCheckDigitsOk(normalizedCpf))
+    {
+        SHStrDupW(L"CPF inválido. Confira os números digitados.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
@@ -628,7 +634,7 @@ $authBlock = @'
     if (authResult != LAB_AUTH_OK ||
         !authResponse.authorized)
     {
-        PCWSTR statusText = L"CPF nao autorizado.";
+        PCWSTR statusText = L"CPF não autorizado.";
 
         if (!authResponse.message.empty())
         {
@@ -636,15 +642,15 @@ $authBlock = @'
         }
         else if (authResult == LAB_AUTH_SERVICE_UNAVAILABLE)
         {
-            statusText = L"Servico de autenticacao indisponivel.";
+            statusText = L"Serviço de autenticação indisponível.";
         }
         else if (authResult == LAB_AUTH_NOT_CONFIGURED)
         {
-            statusText = L"API de autenticacao nao configurada.";
+            statusText = L"API de autenticação não configurada.";
         }
         else if (authResult == LAB_AUTH_CLIENT_UNAUTHORIZED)
         {
-            statusText = L"Este computador nao foi autorizado.";
+            statusText = L"Este computador não foi autorizado.";
         }
 
         SHStrDupW(statusText, ppwszOptionalStatusText);
@@ -665,7 +671,7 @@ $authBlock = @'
             authResponse.windowsAccount.c_str(),
             expectedAccount) != 0)
     {
-        SHStrDupW(L"Perfil retornado pela API e invalido.", ppwszOptionalStatusText);
+        SHStrDupW(L"Perfil retornado pela API é inválido.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
@@ -676,7 +682,7 @@ $authBlock = @'
             adminTarget,
             localPassword))
     {
-        SHStrDupW(L"Segredo local e-GOV nao encontrado.", ppwszOptionalStatusText);
+        SHStrDupW(L"Segredo local e-GOV não encontrado.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         return S_OK;
     }
@@ -762,6 +768,8 @@ $checkProvider = Get-Content (Join-Path $out "CSampleProvider.cpp") -Raw
 $checkSupport = Get-Content (Join-Path $out "LabSupport.cpp") -Raw
 
 $requiredCredential = @(
+    'LabCpfExtractDigits(',
+    'LabCpfCheckDigitsOk(',
     'LabPreviewCpf(',
     'LabAuthorizeCpf(',
     'LabReadLocalPassword(',
@@ -782,16 +790,12 @@ $cpfInputChecks = @(
         Pattern = 'wchar_t\s+digits\[12\]\s*=\s*\{\s*\}\s*;'
     },
     @{
-        Name = "aceita somente 0-9"
-        Pattern = '\*p\s*>=\s*L''0''\s*&&\s*\*p\s*<=\s*L''9'''
+        Name = "normalizacao centralizada em LabSupport"
+        Pattern = 'LabCpfExtractDigits\(\s*pwz\s*,'
     },
     @{
-        Name = "limite de 11 digitos"
-        Pattern = 'digitCount\s*<\s*11'
-    },
-    @{
-        Name = "invalida caracteres nao numericos"
-        Pattern = 'invalidInput\s*=\s*true\s*;'
+        Name = "excesso de digitos invalida a entrada"
+        Pattern = 'invalidChars\s*\|\|\s*excessDigits\s*>\s*0'
     },
     @{
         Name = "nao armazena CPF quando entrada for invalida"
@@ -802,14 +806,68 @@ $cpfInputChecks = @(
         Pattern = 'SHStrDupW\(\s*validatedDigits\s*,\s*stored\s*\)'
     },
     @{
+        Name = "eco do CPF permanece visivel na entrada invalida"
+        Pattern = 'if\s*\(\s*digitCount\s*>\s*0\s*\)'
+    },
+    @{
+        Name = "confere digitos verificadores antes do preview"
+        Pattern = 'LabCpfCheckDigitsOk\(\s*digits\s*\)'
+    },
+    @{
+        Name = "preview so ocorre com CPF conferido"
+        Pattern = 'if\s*\(\s*!checkDigitsOk\s*\)'
+    },
+    @{
         Name = "preview usa somente digitos"
         Pattern = 'LabPreviewCpf\(\s*digits\s*,'
+    },
+    @{
+        Name = "submit reusa a normalizacao da digitacao"
+        Pattern = 'LabCpfExtractDigits\(\s*\r?\n?\s*_rgFieldStrings\[SFI_EDIT_TEXT\]'
+    },
+    @{
+        Name = "submit confere digitos verificadores"
+        Pattern = 'LabCpfCheckDigitsOk\(\s*normalizedCpf\s*\)'
     }
 )
 
 foreach ($check in $cpfInputChecks) {
     if (-not [regex]::IsMatch($checkCredential, $check.Pattern)) {
         throw "Validacao CPF falhou: $($check.Name)"
+    }
+}
+
+# O parsing e o calculo dos digitos verificadores vivem em LabSupport.cpp.
+$cpfSupportChecks = @(
+    @{
+        Name = "aceita somente 0-9"
+        Pattern = '\*p\s*>=\s*L''0''\s*&&\s*\*p\s*<=\s*L''9'''
+    },
+    @{
+        Name = "limite de 11 digitos"
+        Pattern = 'count\s*<\s*11'
+    },
+    @{
+        Name = "ignora separadores do CPF"
+        Pattern = '\*p\s*==\s*L''\.''[\s\S]{0,120}\*p\s*==\s*L''-'''
+    },
+    @{
+        Name = "invalida caracteres nao numericos"
+        Pattern = 'invalid\s*=\s*true\s*;'
+    },
+    @{
+        Name = "rejeita sequencias de digitos iguais"
+        Pattern = 'allSame'
+    },
+    @{
+        Name = "calcula os digitos verificadores"
+        Pattern = '\(\s*total\s*\*\s*10\s*\)\s*%\s*11'
+    }
+)
+
+foreach ($check in $cpfSupportChecks) {
+    if (-not [regex]::IsMatch($checkSupport, $check.Pattern)) {
+        throw "Validacao CPF falhou em LabSupport.cpp: $($check.Name)"
     }
 }
 
