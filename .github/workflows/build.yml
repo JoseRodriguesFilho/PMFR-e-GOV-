@@ -62,6 +62,8 @@ jobs:
           $support = Get-Content .\credential-provider\generated\LabSupport.cpp -Raw
 
           $required = @(
+            "LabCpfExtractDigits",
+            "LabCpfCheckDigitsOk",
             "LabPreviewCpf",
             "LabAuthorizeCpf",
             "LabReadLocalPassword",
